@@ -14,18 +14,22 @@ export interface PlayerState {
 }
 
 export interface SeatInfo {
-  socketId: string;
+  // Stable per-browser id (persisted in localStorage). Survives reconnects.
+  playerId: string;
+  // Current socket id (changes on each reconnect). May be null while waiting.
+  socketId: string | null;
   team: Team;
   name: string;
   connected: boolean;
 }
 
-export type ActionType = "pass" | "dribble" | "shoot";
+export type ActionType = "pass" | "dribble" | "shoot" | "relocate";
 
 export type PendingAction =
   | { type: "pass"; from: string; to: string }
   | { type: "dribble"; from: string; toPos: Position }
-  | { type: "shoot"; from: string };
+  | { type: "shoot"; from: string }
+  | { type: "relocate"; from: string; toPos: Position };
 
 export interface QuizQuestion {
   id: string;

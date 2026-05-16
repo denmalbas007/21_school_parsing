@@ -6,8 +6,8 @@ import {
   createRoom,
   getRoom,
   joinRoom,
-  leaveRoom,
   listOpenRooms,
+  markSocketDisconnected,
   publicRoom,
   startQuizForAction,
   submitAnswer,
@@ -37,6 +37,9 @@ async function main() {
     {
       cors: { origin: "*" },
       path: "/api/socket.io",
+      // Resilient to flaky mobile networks.
+      pingInterval: 20_000,
+      pingTimeout: 25_000,
     },
   );
 
@@ -64,8 +67,8 @@ async function main() {
       broadcastLobby();
     });
 
-    socket.on("room:join", ({ roomId, name }, ack) => {
-      const res = joinRoom(roomId, socket.id, name);
+    socket.on("room:join", ({ roomId, name, playerId }, ack) => {
+      const res = joinRoom(roomId, playerId, socket.id, name);
       if ("error" in res) {
         ack({ error: res.error });
         return;
@@ -78,7 +81,7 @@ async function main() {
 
     socket.on("room:leave", ({ roomId }) => {
       socket.leave(roomId);
-      const affected = leaveRoom(socket.id);
+      const affected = markSocketDisconnected(socket.id);
       for (const r of affected) broadcastRoom(r.id);
       broadcastLobby();
     });
@@ -90,7 +93,7 @@ async function main() {
         action,
         (room, outcome) => {
           io.to(room.id).emit("room:state", publicRoom(room));
-          io.to(room.id).emit("quiz:outcome", outcome);
+          if (outcome) io.to(room.id).emit("quiz:outcome", outcome);
         },
       );
       if ("error" in res) {
@@ -109,7 +112,7 @@ async function main() {
         optionIndex,
         (room, outcome) => {
           io.to(room.id).emit("room:state", publicRoom(room));
-          io.to(room.id).emit("quiz:outcome", outcome);
+          if (outcome) io.to(room.id).emit("quiz:outcome", outcome);
         },
       );
       if ("error" in res) {
@@ -121,13 +124,12 @@ async function main() {
     });
 
     socket.on("disconnect", () => {
-      const affected = leaveRoom(socket.id);
+      const affected = markSocketDisconnected(socket.id);
       for (const r of affected) broadcastRoom(r.id);
       broadcastLobby();
     });
   });
 
-  // Warm the remote question pool on boot.
   maybeRefillRemotePool();
 
   httpServer.listen(port, hostname, () => {

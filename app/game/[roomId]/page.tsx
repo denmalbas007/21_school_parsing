@@ -1,10 +1,11 @@
 "use client";
 
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActionPanel } from "@/components/ActionPanel";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ActionPanel, type ActionMode } from "@/components/ActionPanel";
 import { GameLog } from "@/components/GameLog";
+import { GoalCelebration } from "@/components/GoalCelebration";
 import { Pitch } from "@/components/Pitch";
 import { QuizModal } from "@/components/QuizModal";
 import { Scoreboard } from "@/components/Scoreboard";
@@ -13,6 +14,7 @@ import {
   dribbleTargets as computeDribbleTargets,
   findPlayerById,
   passTargets as computePassTargets,
+  relocateTargets as computeRelocateTargets,
 } from "@/lib/game/engine";
 import type {
   PendingAction,
@@ -27,30 +29,45 @@ export default function GamePage() {
   const params = useParams<{ roomId: string }>();
   const roomId = params.roomId;
   const router = useRouter();
-  const { socket, connected, socketId } = useSocket();
+  const { socket, connected, playerId } = useSocket();
 
   const [room, setRoom] = useState<PublicRoom | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastOutcome, setLastOutcome] = useState<QuizOutcomeMessage | null>(
     null,
   );
-  const [mode, setMode] = useState<"pass" | "dribble" | "shoot" | null>(null);
+  const [mode, setMode] = useState<ActionMode>(null);
+  const [selectedRelocateId, setSelectedRelocateId] = useState<string | null>(
+    null,
+  );
+  const [goalShow, setGoalShow] = useState<{
+    team: Team;
+    scorerLabel: string;
+    mode: "goal" | "win";
+  } | null>(null);
+  const prevScoreRef = useRef<{ A: number; B: number }>({ A: 0, B: 0 });
+  const prevWinnerRef = useRef<Team | null>(null);
 
-  // Join room on mount.
+  // Join or rejoin the room every time we connect (handles reconnects).
   useEffect(() => {
     if (!socket || !connected) return;
     const name =
       (typeof window !== "undefined" &&
         window.localStorage.getItem("qb:name")) ||
       "Игрок";
-    socket.emit("room:join", { roomId, name }, (res) => {
-      if ("error" in res) {
-        setError(res.error);
-        return;
-      }
-      setRoom(res.room);
-    });
-  }, [socket, connected, roomId]);
+    socket.emit(
+      "room:join",
+      { roomId, name, playerId },
+      (res) => {
+        if ("error" in res) {
+          setError(res.error);
+          return;
+        }
+        setRoom(res.room);
+        setError(null);
+      },
+    );
+  }, [socket, connected, roomId, playerId]);
 
   // Subscribe to room state + outcomes.
   useEffect(() => {
@@ -58,35 +75,56 @@ export default function GamePage() {
     const onRoomState = (r: PublicRoom) => {
       if (r.id !== roomId) return;
       setRoom(r);
-      // Reset mode when quiz starts or carrier changes.
       setMode(null);
+      setSelectedRelocateId(null);
     };
     const onOutcome = (msg: QuizOutcomeMessage) => {
       setLastOutcome(msg);
-      // auto-clear notice after 3s
       setTimeout(() => {
         setLastOutcome((cur) =>
           cur?.questionId === msg.questionId ? null : cur,
         );
-      }, 3500);
+      }, 3400);
     };
-    const onError = (msg: { message: string }) => setError(msg.message);
     socket.on("room:state", onRoomState);
     socket.on("quiz:outcome", onOutcome);
-    socket.on("system:error", onError);
     return () => {
       socket.off("room:state", onRoomState);
       socket.off("quiz:outcome", onOutcome);
-      socket.off("system:error", onError);
     };
   }, [socket, roomId]);
 
   const mySeatTeam: Team | null = useMemo(() => {
-    if (!room || !socketId) return null;
-    return room.seats.find((s) => s.socketId === socketId)?.team ?? null;
-  }, [room, socketId]);
+    if (!room) return null;
+    return room.seats.find((s) => s.playerId === playerId)?.team ?? null;
+  }, [room, playerId]);
 
   const state = room?.state ?? null;
+
+  // Detect goal / win and trigger the celebration overlay.
+  useEffect(() => {
+    if (!state) return;
+    const prev = prevScoreRef.current;
+    const scoredTeam: Team | null =
+      state.score.A > prev.A ? "A" : state.score.B > prev.B ? "B" : null;
+    if (scoredTeam) {
+      const isWin =
+        state.winner === scoredTeam || prevWinnerRef.current !== state.winner;
+      const winnerJust = state.winner === scoredTeam;
+      setGoalShow({
+        team: scoredTeam,
+        scorerLabel: winnerJust ? "Финальный счёт" : "",
+        mode: winnerJust ? "win" : "goal",
+      });
+      setTimeout(
+        () => setGoalShow(null),
+        winnerJust ? 4500 : 2200,
+      );
+      void isWin;
+    }
+    prevScoreRef.current = { ...state.score };
+    prevWinnerRef.current = state.winner;
+  }, [state]);
 
   const carrier: PlayerState | null = useMemo(() => {
     if (!state) return null;
@@ -95,17 +133,28 @@ export default function GamePage() {
       : null;
   }, [state]);
 
+  const iHaveBall =
+    !!carrier && mySeatTeam !== null && carrier.team === mySeatTeam;
+  const myTurn = state !== null && mySeatTeam !== null && state.turn === mySeatTeam;
+
   const passTargets = useMemo(() => {
     if (!state || !carrier || mode !== "pass") return [];
-    if (carrier.team !== mySeatTeam) return [];
+    if (!iHaveBall) return [];
     return computePassTargets(state, carrier).map((p) => p.id);
-  }, [state, carrier, mode, mySeatTeam]);
+  }, [state, carrier, mode, iHaveBall]);
 
   const dribbleTargets: Position[] = useMemo(() => {
     if (!state || !carrier || mode !== "dribble") return [];
-    if (carrier.team !== mySeatTeam) return [];
+    if (!iHaveBall) return [];
     return computeDribbleTargets(state, carrier);
-  }, [state, carrier, mode, mySeatTeam]);
+  }, [state, carrier, mode, iHaveBall]);
+
+  const relocateTargets: Position[] = useMemo(() => {
+    if (!state || mode !== "relocate" || !selectedRelocateId) return [];
+    const p = findPlayerById(state, selectedRelocateId);
+    if (!p) return [];
+    return computeRelocateTargets(state, p);
+  }, [state, mode, selectedRelocateId]);
 
   const submitAction = useCallback(
     (action: PendingAction) => {
@@ -115,28 +164,36 @@ export default function GamePage() {
         else setError(null);
       });
       setMode(null);
+      setSelectedRelocateId(null);
     },
     [socket, roomId],
   );
 
   const handleSelectPlayer = useCallback(
     (target: PlayerState) => {
-      if (!state || !carrier) return;
-      if (mode === "pass" && target.team === carrier.team && target.id !== carrier.id) {
+      if (!state || !mySeatTeam) return;
+      if (mode === "pass" && carrier && target.team === carrier.team && target.id !== carrier.id) {
         submitAction({ type: "pass", from: carrier.id, to: target.id });
+      } else if (mode === "relocate" && target.team === mySeatTeam) {
+        setSelectedRelocateId(target.id);
       }
     },
-    [state, carrier, mode, submitAction],
+    [state, carrier, mode, mySeatTeam, submitAction],
   );
 
   const handleSelectCell = useCallback(
     (pos: Position) => {
-      if (!carrier) return;
-      if (mode === "dribble") {
+      if (mode === "dribble" && carrier) {
         submitAction({ type: "dribble", from: carrier.id, toPos: pos });
+      } else if (mode === "relocate" && selectedRelocateId) {
+        submitAction({
+          type: "relocate",
+          from: selectedRelocateId,
+          toPos: pos,
+        });
       }
     },
-    [carrier, mode, submitAction],
+    [mode, carrier, selectedRelocateId, submitAction],
   );
 
   const handleShoot = useCallback(() => {
@@ -180,6 +237,21 @@ export default function GamePage() {
 
   const waitingForOpponent = room.seats.length < 2;
 
+  const turnLabel = (() => {
+    if (state.status === "ended" && state.winner)
+      return `Команда ${state.winner} победила!`;
+    if (waitingForOpponent) return "Ждём второго игрока";
+    if (state.status === "quiz") return "Идёт викторина";
+    if (state.status === "goal") return "ГОЛ! Розыгрыш с центра…";
+    if (myTurn) {
+      if (iHaveBall) return "Ваш ход — атакуйте с мячом";
+      return "Ваш ход — переместите игрока в защиту";
+    }
+    return `Ход соперника (${state.turn})`;
+  })();
+
+  const turnAccent = myTurn ? "emerald" : "zinc";
+
   return (
     <main className="flex-1 px-3 py-4 sm:px-6 sm:py-8">
       <div className="mx-auto flex max-w-5xl flex-col gap-4">
@@ -190,12 +262,45 @@ export default function GamePage() {
           >
             ← в лобби
           </button>
-          <div className="text-xs text-zinc-400">
-            комната <span className="font-mono text-zinc-200">#{room.id}</span>
+          <div className="flex items-center gap-3 text-xs text-zinc-400">
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 ${
+                connected
+                  ? "bg-emerald-500/15 text-emerald-300"
+                  : "bg-rose-500/15 text-rose-300"
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  connected ? "bg-emerald-400" : "bg-rose-400 animate-pulse"
+                }`}
+              />
+              {connected ? "онлайн" : "переподключаемся…"}
+            </span>
+            <span>
+              комната{" "}
+              <span className="font-mono text-zinc-200">#{room.id}</span>
+            </span>
           </div>
         </header>
 
         <Scoreboard state={state} seats={room.seats} mySeatTeam={mySeatTeam} />
+
+        <AnimatePresence>
+          <motion.div
+            key={turnLabel}
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            className={`rounded-2xl px-4 py-2 text-center text-sm font-medium ${
+              turnAccent === "emerald"
+                ? "bg-emerald-500/15 text-emerald-200 ring-1 ring-emerald-400/30"
+                : "glass text-zinc-300"
+            }`}
+          >
+            {turnLabel}
+          </motion.div>
+        </AnimatePresence>
 
         {waitingForOpponent && (
           <motion.div
@@ -203,8 +308,8 @@ export default function GamePage() {
             animate={{ opacity: 1, y: 0 }}
             className="glass rounded-2xl px-4 py-3 text-sm text-zinc-200"
           >
-            Ждём второго игрока. Поделитесь этой ссылкой:&nbsp;
-            <code className="rounded bg-white/10 px-2 py-0.5">
+            Поделитесь ссылкой со вторым игроком:&nbsp;
+            <code className="rounded bg-white/10 px-2 py-0.5 break-all">
               {typeof window !== "undefined" ? window.location.href : ""}
             </code>
           </motion.div>
@@ -212,10 +317,11 @@ export default function GamePage() {
 
         <Pitch
           state={state}
-          mySocketId={socketId}
           mySeatTeam={mySeatTeam}
+          selectedRelocatePlayerId={selectedRelocateId}
           passTargetIds={passTargets}
           dribbleTargets={dribbleTargets}
+          relocateTargets={relocateTargets}
           canShoot={mode === "shoot"}
           highlightActionMode={mode}
           onSelectPlayer={handleSelectPlayer}
@@ -228,7 +334,10 @@ export default function GamePage() {
             state={state}
             mySeatTeam={mySeatTeam}
             mode={mode}
-            onSetMode={setMode}
+            onSetMode={(m) => {
+              setMode(m);
+              setSelectedRelocateId(null);
+            }}
           />
           <GameLog entries={state.log} />
         </div>
@@ -249,6 +358,13 @@ export default function GamePage() {
         mySeatTeam={mySeatTeam}
         lastOutcome={lastOutcome}
         onAnswer={handleAnswer}
+      />
+
+      <GoalCelebration
+        show={!!goalShow}
+        team={goalShow?.team ?? null}
+        scorerLabel={goalShow?.scorerLabel}
+        mode={goalShow?.mode ?? null}
       />
     </main>
   );

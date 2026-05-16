@@ -11,13 +11,6 @@ export const COLS = 8;
 export const ROWS = 5;
 export const GOAL_TARGET = 3;
 
-// Team A defends col -1 (left) and attacks toward col COLS (right).
-// Team B is mirrored.
-export const ATTACKING_GOAL: Record<Team, "right" | "left"> = {
-  A: "right",
-  B: "left",
-};
-
 export function otherTeam(t: Team): Team {
   return t === "A" ? "B" : "A";
 }
@@ -133,7 +126,6 @@ export function defendersOnLine(
 }
 
 export function goalCenter(defendingTeam: Team): Position {
-  // The conceptual goal cell sits one column outside the pitch.
   const middleRow = Math.floor(ROWS / 2);
   return defendingTeam === "A"
     ? { col: -1, row: middleRow }
@@ -144,7 +136,6 @@ export function goalCenter(defendingTeam: Team): Position {
 
 function initialPlayers(): PlayerState[] {
   const middleRow = Math.floor(ROWS / 2);
-  // 3v3, lined up symmetrically.
   return [
     { id: "A1", team: "A", number: 1, pos: { col: 1, row: middleRow - 1 } },
     { id: "A2", team: "A", number: 2, pos: { col: 1, row: middleRow } },
@@ -220,6 +211,15 @@ export function dribbleTargets(
   return out;
 }
 
+// Cells a non-carrier player can relocate to during the off-ball turn.
+// Same as dribble: 1 cell in any of 8 directions, must be empty.
+export function relocateTargets(
+  state: GameState,
+  player: PlayerState,
+): Position[] {
+  return dribbleTargets(state, player);
+}
+
 export function passTargets(
   state: GameState,
   player: PlayerState,
@@ -245,13 +245,48 @@ export function validateAction(
   if (state.turn !== actorSocketTeam) {
     return { ok: false, reason: "Сейчас ход соперника." };
   }
-  if (!state.ballCarrierId) {
-    return { ok: false, reason: "Мяч сейчас ничей." };
-  }
   const actor = findPlayerById(state, action.from);
   if (!actor) return { ok: false, reason: "Игрок не найден." };
   if (actor.team !== actorSocketTeam) {
     return { ok: false, reason: "Это не ваш игрок." };
+  }
+
+  const myTeamHasBall =
+    state.ballCarrierId != null &&
+    findPlayerById(state, state.ballCarrierId)?.team === actorSocketTeam;
+
+  if (action.type === "relocate") {
+    if (myTeamHasBall) {
+      return {
+        ok: false,
+        reason: "У вас мяч — выберите пас, дриблинг или удар.",
+      };
+    }
+    const dx = Math.abs(action.toPos.col - actor.pos.col);
+    const dy = Math.abs(action.toPos.row - actor.pos.row);
+    if (dx > 1 || dy > 1 || (dx === 0 && dy === 0)) {
+      return { ok: false, reason: "Можно сдвинуть только на 1 клетку." };
+    }
+    if (
+      action.toPos.col < 0 ||
+      action.toPos.col >= COLS ||
+      action.toPos.row < 0 ||
+      action.toPos.row >= ROWS
+    ) {
+      return { ok: false, reason: "За пределами поля." };
+    }
+    if (findPlayerAt(state, action.toPos)) {
+      return { ok: false, reason: "Клетка занята." };
+    }
+    return { ok: true };
+  }
+
+  // The remaining actions require the player to be the ball carrier.
+  if (!myTeamHasBall) {
+    return {
+      ok: false,
+      reason: "Мяч не у вашей команды — переместите игрока в защиту.",
+    };
   }
   if (actor.id !== state.ballCarrierId) {
     return { ok: false, reason: "Этот игрок не владеет мячом." };
@@ -302,7 +337,37 @@ export interface ResolutionResult {
   goal: boolean;
 }
 
-// Move ball / players to reflect a successful actor outcome.
+// All actions always end the acting team's turn — strict alternation.
+function flipTurn(state: GameState, actingTeam: Team): Team {
+  return otherTeam(actingTeam);
+}
+
+// Non-quiz action: relocate a non-carrier player one cell.
+export function applyRelocate(
+  state: GameState,
+  action: { type: "relocate"; from: string; toPos: Position },
+): ResolutionResult {
+  const actor = findPlayerById(state, action.from);
+  if (!actor) return { state, description: "Игрок не найден", goal: false };
+  const movedPlayers = state.players.map((p) =>
+    p.id === actor.id ? { ...p, pos: { ...action.toPos } } : p,
+  );
+  const next: GameState = {
+    ...state,
+    players: movedPlayers,
+    activePlayerId: actor.id,
+    turn: flipTurn(state, actor.team),
+    status: "play",
+    turnNumber: state.turnNumber + 1,
+    log: [
+      ...state.log,
+      { at: Date.now(), text: `${badge(actor)} занял позицию.` },
+    ],
+    quiz: null,
+  };
+  return { state: next, description: "Позиция занята", goal: false };
+}
+
 export function applyActorSuccess(
   state: GameState,
   action: PendingAction,
@@ -315,13 +380,14 @@ export function applyActorSuccess(
   if (action.type === "pass") {
     const target = findPlayerById(state, action.to);
     if (!target) return { state, description: "Принимающий пропал", goal: false };
-    const next = {
+    const next: GameState = {
       ...state,
       ballCarrierId: target.id,
       ballPos: { ...target.pos },
       activePlayerId: target.id,
-      turn: target.team,
-      status: "play" as const,
+      // Strict alternation — opponent gets a turn (positioning) before we act again.
+      turn: flipTurn(state, actor.team),
+      status: "play",
       turnNumber: state.turnNumber + 1,
       log: [
         ...state.log,
@@ -344,7 +410,7 @@ export function applyActorSuccess(
       players: movedPlayers,
       ballPos: { ...action.toPos },
       activePlayerId: actor.id,
-      turn: otherTeam(actor.team),
+      turn: flipTurn(state, actor.team),
       status: "play",
       turnNumber: state.turnNumber + 1,
       log: [
@@ -383,9 +449,17 @@ export function applyActorSuccess(
     };
     return { state: next, description: "Гол!", goal: true };
   }
+
+  if (action.type === "relocate") {
+    return applyRelocate(state, action);
+  }
+
   return { state, description: "?", goal: false };
 }
 
+// When a defender intercepts, the defender's team gains the ball.
+// The original acting team consumed their turn, so the defender's team
+// becomes the next ball-carrier AND gets the next turn (they earned it).
 export function applyDefenderSteal(
   state: GameState,
   defender: PlayerState,
@@ -418,9 +492,6 @@ export function applyTotalFailure(
   state: GameState,
   action: PendingAction,
 ): ResolutionResult {
-  // Nobody got it right in time → ball is loose, nearest opposite-team player
-  // claims it. If actor is closest in absence of opponents, opponent team
-  // still gets it (penalty for chaos).
   const actor = findPlayerById(state, action.from);
   if (!actor) return { state, description: "?", goal: false };
 
@@ -449,6 +520,7 @@ export function applyTotalFailure(
     ballCarrierId: nearest.id,
     ballPos: { ...nearest.pos },
     activePlayerId: nearest.id,
+    // They just took the ball — they earned the next turn.
     turn: nearest.team,
     status: "play",
     turnNumber: state.turnNumber + 1,

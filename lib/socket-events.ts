@@ -15,11 +15,11 @@ export interface ServerToClientEvents {
 export interface ClientToServerEvents {
   "lobby:list": () => void;
   "lobby:create": (
-    payload: { name: string },
+    payload: { name: string; playerId: string },
     ack: (res: { roomId: string } | { error: string }) => void,
   ) => void;
   "room:join": (
-    payload: { roomId: string; name: string },
+    payload: { roomId: string; name: string; playerId: string },
     ack: (res: { ok: true; room: PublicRoom } | { error: string }) => void,
   ) => void;
   "room:leave": (payload: { roomId: string }) => void;

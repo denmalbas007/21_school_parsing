@@ -5,28 +5,32 @@ import { useMemo } from "react";
 import { cn } from "@/lib/utils";
 import type { GameState, PlayerState, Position, Team } from "@/lib/game/types";
 
+export type ActionMode = "pass" | "dribble" | "shoot" | "relocate" | null;
+
 interface PitchProps {
   state: GameState;
-  mySocketId: string | null;
   mySeatTeam: Team | null;
-  // Visible during action picker
+  selectedRelocatePlayerId: string | null;
   passTargetIds?: string[];
   dribbleTargets?: Position[];
+  relocateTargets?: Position[];
   canShoot?: boolean;
-  highlightActionMode?: "pass" | "dribble" | "shoot" | null;
+  highlightActionMode: ActionMode;
   onSelectPlayer?: (player: PlayerState) => void;
   onSelectCell?: (pos: Position) => void;
   onShoot?: () => void;
 }
 
-const CELL = 64; // px per cell
+const CELL = 64;
 const PAD = 28;
 
 export function Pitch({
   state,
   mySeatTeam,
+  selectedRelocatePlayerId,
   passTargetIds,
   dribbleTargets,
+  relocateTargets,
   canShoot,
   highlightActionMode,
   onSelectPlayer,
@@ -38,11 +42,6 @@ export function Pitch({
 
   const carrier = state.players.find((p) => p.id === state.ballCarrierId);
 
-  const ballScreenPos = useMemo(() => {
-    if (carrier) return cellCenter(carrier.pos);
-    return cellCenter(state.ballPos);
-  }, [carrier, state.ballPos]);
-
   function cellCenter(p: Position) {
     return {
       x: PAD + p.col * CELL + CELL / 2,
@@ -50,17 +49,23 @@ export function Pitch({
     };
   }
 
+  const ballScreenPos = useMemo(() => {
+    if (carrier) return cellCenter(carrier.pos);
+    return cellCenter(state.ballPos);
+  }, [carrier, state.ballPos]);
+
+  const goalACy = PAD + CELL * Math.floor(state.rows / 2) + CELL / 2;
+
   return (
     <div className="relative w-full overflow-x-auto">
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="mx-auto block w-full max-w-[640px]"
+        className="mx-auto block w-full max-w-[680px]"
       >
-        {/* Pitch background */}
         <defs>
-          <linearGradient id="pitchGrad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="#0e5430" />
-            <stop offset="100%" stopColor="#0a3d23" />
+          <linearGradient id="pitchGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#127a3c" />
+            <stop offset="100%" stopColor="#0a4a25" />
           </linearGradient>
           <pattern
             id="stripes"
@@ -73,10 +78,24 @@ export function Pitch({
               x={CELL}
               width={CELL}
               height={H}
-              fill="rgba(255,255,255,0.04)"
+              fill="rgba(255,255,255,0.045)"
             />
           </pattern>
+          <radialGradient id="ballGrad">
+            <stop offset="0%" stopColor="#ffffff" />
+            <stop offset="70%" stopColor="#eaeaea" />
+            <stop offset="100%" stopColor="#a0a0a0" />
+          </radialGradient>
+          <filter id="playerGlow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
         </defs>
+
+        {/* Pitch */}
         <rect
           x={0}
           y={0}
@@ -85,7 +104,6 @@ export function Pitch({
           rx={18}
           fill="url(#stripes)"
         />
-        {/* Outer line */}
         <rect
           x={PAD}
           y={PAD}
@@ -95,7 +113,6 @@ export function Pitch({
           stroke="rgba(255,255,255,0.65)"
           strokeWidth={2}
         />
-        {/* Centre line */}
         <line
           x1={PAD + (state.cols * CELL) / 2}
           y1={PAD}
@@ -104,7 +121,6 @@ export function Pitch({
           stroke="rgba(255,255,255,0.55)"
           strokeWidth={1.5}
         />
-        {/* Centre circle */}
         <circle
           cx={PAD + (state.cols * CELL) / 2}
           cy={PAD + (state.rows * CELL) / 2}
@@ -113,42 +129,75 @@ export function Pitch({
           stroke="rgba(255,255,255,0.55)"
           strokeWidth={1.5}
         />
-        {/* Goal areas */}
+        <circle
+          cx={PAD + (state.cols * CELL) / 2}
+          cy={PAD + (state.rows * CELL) / 2}
+          r={3}
+          fill="rgba(255,255,255,0.55)"
+        />
+        {/* Penalty boxes (left & right) */}
         <rect
           x={PAD}
-          y={PAD + CELL}
-          width={CELL}
-          height={CELL * (state.rows - 2)}
-          fill="rgba(255,255,255,0.06)"
-          stroke="rgba(255,255,255,0.45)"
+          y={PAD + CELL * 0.5}
+          width={CELL * 1.5}
+          height={CELL * (state.rows - 1)}
+          fill="rgba(255,255,255,0.04)"
+          stroke="rgba(255,255,255,0.5)"
         />
         <rect
-          x={PAD + (state.cols - 1) * CELL}
-          y={PAD + CELL}
-          width={CELL}
-          height={CELL * (state.rows - 2)}
-          fill="rgba(255,255,255,0.06)"
-          stroke="rgba(255,255,255,0.45)"
+          x={PAD + (state.cols - 1.5) * CELL}
+          y={PAD + CELL * 0.5}
+          width={CELL * 1.5}
+          height={CELL * (state.rows - 1)}
+          fill="rgba(255,255,255,0.04)"
+          stroke="rgba(255,255,255,0.5)"
         />
+
         {/* Goals (outside playing area) */}
         <rect
-          x={PAD - 10}
-          y={PAD + CELL * Math.floor(state.rows / 2) - 4}
-          width={10}
-          height={CELL + 8}
-          fill="rgba(34, 211, 238, 0.6)"
+          x={PAD - 12}
+          y={goalACy - CELL * 0.9}
+          width={12}
+          height={CELL * 1.8}
+          fill="rgba(34, 211, 238, 0.5)"
+          stroke="rgba(34, 211, 238, 0.95)"
+          strokeWidth={2}
           rx={2}
         />
         <rect
           x={PAD + state.cols * CELL}
-          y={PAD + CELL * Math.floor(state.rows / 2) - 4}
-          width={10}
-          height={CELL + 8}
-          fill="rgba(244, 63, 94, 0.6)"
+          y={goalACy - CELL * 0.9}
+          width={12}
+          height={CELL * 1.8}
+          fill="rgba(244, 63, 94, 0.5)"
+          stroke="rgba(244, 63, 94, 0.95)"
+          strokeWidth={2}
           rx={2}
         />
 
-        {/* Cells (for dribble click) */}
+        {/* Relocate target cells */}
+        {relocateTargets?.map((pos, i) => {
+          const c = cellCenter(pos);
+          return (
+            <motion.rect
+              key={`reloc-${i}`}
+              x={c.x - CELL / 2 + 4}
+              y={c.y - CELL / 2 + 4}
+              width={CELL - 8}
+              height={CELL - 8}
+              rx={10}
+              fill="rgba(96, 165, 250, 0.18)"
+              stroke="rgba(96, 165, 250, 0.85)"
+              strokeDasharray="4 4"
+              initial={{ opacity: 0, scale: 0.7 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="cursor-pointer"
+              onClick={() => onSelectCell?.(pos)}
+            />
+          );
+        })}
+
+        {/* Dribble target cells */}
         {dribbleTargets?.map((pos, i) => {
           const c = cellCenter(pos);
           return (
@@ -159,57 +208,71 @@ export function Pitch({
               width={CELL - 8}
               height={CELL - 8}
               rx={10}
-              fill="rgba(250, 204, 21, 0.15)"
-              stroke="rgba(250, 204, 21, 0.7)"
+              fill="rgba(250, 204, 21, 0.18)"
+              stroke="rgba(250, 204, 21, 0.85)"
               strokeDasharray="4 4"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
+              initial={{ opacity: 0, scale: 0.7 }}
+              animate={{ opacity: 1, scale: 1 }}
               className="cursor-pointer"
               onClick={() => onSelectCell?.(pos)}
             />
           );
         })}
 
-        {/* Pass targets indicators */}
-        {passTargetIds?.map((id) => {
-          const p = state.players.find((pl) => pl.id === id);
-          if (!p) return null;
-          const c = cellCenter(p.pos);
-          return (
-            <motion.circle
-              key={`pt-${id}`}
-              cx={c.x}
-              cy={c.y}
-              r={CELL * 0.5}
-              fill="transparent"
-              stroke="rgba(250, 204, 21, 0.9)"
-              strokeWidth={3}
-              strokeDasharray="5 4"
-              initial={{ opacity: 0, scale: 0.6 }}
-              animate={{ opacity: 1, scale: 1 }}
-            />
-          );
-        })}
+        {/* Pass target highlights + dashed line from carrier */}
+        {carrier &&
+          passTargetIds?.map((id) => {
+            const p = state.players.find((pl) => pl.id === id);
+            if (!p) return null;
+            const c = cellCenter(p.pos);
+            const cFrom = cellCenter(carrier.pos);
+            return (
+              <g key={`pt-${id}`}>
+                <motion.line
+                  x1={cFrom.x}
+                  y1={cFrom.y}
+                  x2={c.x}
+                  y2={c.y}
+                  stroke="rgba(250, 204, 21, 0.6)"
+                  strokeWidth={2}
+                  strokeDasharray="6 5"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                />
+                <motion.circle
+                  cx={c.x}
+                  cy={c.y}
+                  r={CELL * 0.5}
+                  fill="transparent"
+                  stroke="rgba(250, 204, 21, 0.95)"
+                  strokeWidth={3}
+                  strokeDasharray="5 4"
+                  initial={{ opacity: 0, scale: 0.5 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                />
+              </g>
+            );
+          })}
 
         {/* Shoot indicator */}
         {canShoot && carrier && (
-          <>
+          <g>
             <motion.line
               x1={cellCenter(carrier.pos).x}
               y1={cellCenter(carrier.pos).y}
               x2={
                 carrier.team === "A"
-                  ? PAD + state.cols * CELL + 10
-                  : PAD - 10
+                  ? PAD + state.cols * CELL + 12
+                  : PAD - 12
               }
-              y2={PAD + CELL * Math.floor(state.rows / 2) + CELL / 2}
+              y2={goalACy}
               stroke={
                 carrier.team === "A"
                   ? "rgba(244, 63, 94, 0.85)"
                   : "rgba(34, 211, 238, 0.85)"
               }
               strokeWidth={3}
-              strokeDasharray="6 6"
+              strokeDasharray="8 6"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               className="cursor-pointer"
@@ -218,18 +281,18 @@ export function Pitch({
             <motion.circle
               cx={
                 carrier.team === "A"
-                  ? PAD + state.cols * CELL + 10
-                  : PAD - 10
+                  ? PAD + state.cols * CELL + 12
+                  : PAD - 12
               }
-              cy={PAD + CELL * Math.floor(state.rows / 2) + CELL / 2}
-              r={12}
-              fill="rgba(255,255,255,0.85)"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
+              cy={goalACy}
+              r={13}
+              fill="rgba(255,255,255,0.92)"
+              initial={{ opacity: 0, scale: 0.6 }}
+              animate={{ opacity: 1, scale: 1 }}
               className="cursor-pointer"
               onClick={() => onShoot?.()}
             />
-          </>
+          </g>
         )}
 
         {/* Players */}
@@ -237,12 +300,20 @@ export function Pitch({
           const c = cellCenter(p.pos);
           const isActive = p.id === state.activePlayerId;
           const isCarrier = p.id === state.ballCarrierId;
+          const isSelectedRelocate = p.id === selectedRelocatePlayerId;
           const teamColor =
             p.team === "A"
               ? "rgb(34, 211, 238)"
               : "rgb(244, 63, 94)";
+          const teamShadow =
+            p.team === "A"
+              ? "rgba(34, 211, 238, 0.55)"
+              : "rgba(244, 63, 94, 0.55)";
           const clickable =
             !!passTargetIds?.includes(p.id) ||
+            (highlightActionMode === "relocate" &&
+              mySeatTeam === p.team &&
+              !isCarrier) ||
             (highlightActionMode === null &&
               mySeatTeam === p.team &&
               p.id === state.ballCarrierId);
@@ -255,14 +326,18 @@ export function Pitch({
               className={cn(clickable && "cursor-pointer")}
               onClick={() => clickable && onSelectPlayer?.(p)}
             >
-              {isActive && (
+              {(isActive || isSelectedRelocate) && (
                 <motion.circle
-                  r={CELL * 0.45}
+                  r={CELL * 0.46}
                   fill="transparent"
-                  stroke="rgba(250, 204, 21, 0.9)"
-                  strokeWidth={2}
+                  stroke={
+                    isSelectedRelocate
+                      ? "rgba(96, 165, 250, 0.95)"
+                      : "rgba(250, 204, 21, 0.9)"
+                  }
+                  strokeWidth={2.5}
                   initial={{ scale: 0.8, opacity: 0.6 }}
-                  animate={{ scale: [1, 1.12, 1], opacity: [0.6, 1, 0.6] }}
+                  animate={{ scale: [1, 1.14, 1], opacity: [0.7, 1, 0.7] }}
                   transition={{
                     duration: 1.6,
                     repeat: Infinity,
@@ -273,45 +348,48 @@ export function Pitch({
               <circle
                 r={CELL * 0.36}
                 fill={teamColor}
-                stroke="rgba(0,0,0,0.5)"
+                stroke="rgba(0,0,0,0.55)"
                 strokeWidth={2}
+                style={{ filter: `drop-shadow(0 0 8px ${teamShadow})` }}
               />
               <text
                 textAnchor="middle"
                 dominantBaseline="middle"
-                fontSize={CELL * 0.36}
-                fontWeight={700}
+                fontSize={CELL * 0.34}
+                fontWeight={800}
                 fill="rgba(0,0,0,0.85)"
+                style={{ pointerEvents: "none" }}
               >
                 {p.number}
               </text>
               {isCarrier && (
-                <circle
-                  cx={CELL * 0.28}
-                  cy={-CELL * 0.28}
-                  r={6}
-                  fill="white"
-                  stroke="black"
-                  strokeWidth={1}
-                />
+                <g style={{ pointerEvents: "none" }}>
+                  <circle
+                    cx={CELL * 0.28}
+                    cy={-CELL * 0.28}
+                    r={8}
+                    fill="url(#ballGrad)"
+                    stroke="black"
+                    strokeWidth={1}
+                  />
+                </g>
               )}
             </motion.g>
           );
         })}
 
-        {/* Ball — animated separately so it visually travels */}
-        <motion.circle
-          initial={false}
-          animate={{
-            cx: ballScreenPos.x + (carrier ? CELL * 0.28 : 0),
-            cy: ballScreenPos.y + (carrier ? -CELL * 0.28 : 0),
-          }}
-          transition={{ type: "spring", stiffness: 200, damping: 20 }}
-          r={7}
-          fill="white"
-          stroke="black"
-          strokeWidth={1.5}
-        />
+        {/* Loose ball — separate animated element if not carried */}
+        {!carrier && (
+          <motion.circle
+            initial={false}
+            animate={{ cx: ballScreenPos.x, cy: ballScreenPos.y }}
+            transition={{ type: "spring", stiffness: 200, damping: 20 }}
+            r={9}
+            fill="url(#ballGrad)"
+            stroke="black"
+            strokeWidth={1.5}
+          />
+        )}
       </svg>
     </div>
   );

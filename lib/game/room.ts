@@ -2,6 +2,7 @@ import { nanoid } from "nanoid";
 import {
   applyActorSuccess,
   applyDefenderSteal,
+  applyRelocate,
   applyTotalFailure,
   createInitialState,
   dribbleDifficulty,
@@ -31,9 +32,14 @@ interface RoomRecord {
   quizTimer: NodeJS.Timeout | null;
   // Server-side answer key for the current quiz (we never expose it).
   currentAnswerIndex: number | null;
+  // Tracks pending GC after all players disconnect.
+  gcTimer: NodeJS.Timeout | null;
 }
 
 const rooms = new Map<string, RoomRecord>();
+
+// Reverse index: socketId → roomId (helps cleanup on disconnect).
+const socketToRoom = new Map<string, string>();
 
 export function listOpenRooms(): PublicRoom[] {
   const out: PublicRoom[] = [];
@@ -65,6 +71,7 @@ export function createRoom(): RoomRecord {
     state: createInitialState(id),
     quizTimer: null,
     currentAnswerIndex: null,
+    gcTimer: null,
   };
   rooms.set(id, record);
   return record;
@@ -72,32 +79,45 @@ export function createRoom(): RoomRecord {
 
 export function joinRoom(
   roomId: string,
+  playerId: string,
   socketId: string,
   name: string,
 ): { room: RoomRecord; seat: SeatInfo } | { error: string } {
   const room = rooms.get(roomId);
   if (!room) return { error: "Комната не найдена." };
 
-  // Reconnect path: same socket id already seated.
-  const existing = room.seats.find((s) => s.socketId === socketId);
+  // Cancel any pending GC since someone is connecting now.
+  if (room.gcTimer) {
+    clearTimeout(room.gcTimer);
+    room.gcTimer = null;
+  }
+
+  // Reconnect path: same stable playerId already seated.
+  const existing = room.seats.find((s) => s.playerId === playerId);
   if (existing) {
+    if (existing.socketId && existing.socketId !== socketId) {
+      socketToRoom.delete(existing.socketId);
+    }
+    existing.socketId = socketId;
     existing.connected = true;
-    existing.name = name || existing.name;
+    if (name) existing.name = name;
+    socketToRoom.set(socketId, roomId);
     return { room, seat: existing };
   }
 
   if (room.seats.length >= 2) return { error: "Комната заполнена." };
 
-  // Assign team — first joiner = A, second = B (or whichever is missing).
   const takenTeams = new Set(room.seats.map((s) => s.team));
   const team: Team = takenTeams.has("A") ? "B" : "A";
   const seat: SeatInfo = {
+    playerId,
     socketId,
     team,
     name: name || `Игрок ${team}`,
     connected: true,
   };
   room.seats.push(seat);
+  socketToRoom.set(socketId, roomId);
 
   if (room.seats.length === 2 && room.state.status === "waiting") {
     room.state = kickoffFor(room.state, "A");
@@ -110,15 +130,29 @@ export function joinRoom(
   return { room, seat };
 }
 
-export function leaveRoom(socketId: string): RoomRecord[] {
+// Called on socket disconnect. Marks the seat offline but keeps it so the
+// player can reconnect under their stable playerId within the grace window.
+export function markSocketDisconnected(socketId: string): RoomRecord[] {
   const affected: RoomRecord[] = [];
-  for (const room of rooms.values()) {
-    const seat = room.seats.find((s) => s.socketId === socketId);
-    if (!seat) continue;
-    seat.connected = false;
-    affected.push(room);
-    // If room is empty + nobody connected for some time, garbage-collect later.
-    setTimeout(() => {
+  const roomId = socketToRoom.get(socketId);
+  if (!roomId) return affected;
+  socketToRoom.delete(socketId);
+  const room = rooms.get(roomId);
+  if (!room) return affected;
+  const seat = room.seats.find((s) => s.socketId === socketId);
+  if (!seat) return affected;
+  seat.connected = false;
+  seat.socketId = null;
+  room.state.log.push({
+    at: Date.now(),
+    text: `Игрок команды ${seat.team} отключился. Ждём возвращения 60 сек.`,
+  });
+  affected.push(room);
+
+  // Schedule GC if everyone is offline.
+  if (room.seats.every((s) => !s.connected)) {
+    if (room.gcTimer) clearTimeout(room.gcTimer);
+    room.gcTimer = setTimeout(() => {
       if (room.seats.every((s) => !s.connected)) {
         if (room.quizTimer) clearTimeout(room.quizTimer);
         rooms.delete(room.id);
@@ -133,7 +167,7 @@ function teamOfSocket(room: RoomRecord, socketId: string): Team | null {
 }
 
 // ---------------------------------------------------------------------------
-//  Quiz lifecycle
+//  Quiz lifecycle + non-quiz actions
 // ---------------------------------------------------------------------------
 
 export interface QuizStartResult {
@@ -141,15 +175,20 @@ export interface QuizStartResult {
   quiz: ActiveQuiz;
 }
 
+// Returns either a quiz-start result, an immediate-resolution result (for
+// `relocate`), or an error.
 export function startQuizForAction(
   roomId: string,
   socketId: string,
   action: PendingAction,
   onResolve: (
     room: RoomRecord,
-    outcome: QuizOutcomeMessage,
+    outcome: QuizOutcomeMessage | null,
   ) => void,
-): QuizStartResult | { error: string } {
+):
+  | { quiz: QuizStartResult }
+  | { instantResolved: true; room: RoomRecord }
+  | { error: string } {
   const room = rooms.get(roomId);
   if (!room) return { error: "Комната не найдена." };
   const actorTeam = teamOfSocket(room, socketId);
@@ -158,9 +197,16 @@ export function startQuizForAction(
   const validation = validateAction(room.state, actorTeam, action);
   if (!validation.ok) return { error: validation.reason ?? "Неверный ход." };
 
+  // Relocate is the only action without a quiz.
+  if (action.type === "relocate") {
+    const res = applyRelocate(room.state, action);
+    room.state = res.state;
+    onResolve(room, null);
+    return { instantResolved: true, room };
+  }
+
   const actor = findPlayerById(room.state, action.from)!;
 
-  // Figure out who participates + difficulty
   let difficulty: "easy" | "medium" | "hard";
   let defenders: { id: string; team: Team }[] = [];
 
@@ -225,7 +271,7 @@ export function startQuizForAction(
     finalizeQuiz(room, onResolve, /* timedOut */ true);
   }, deadlineAt - startedAt + 100);
 
-  return { room, quiz };
+  return { quiz: { room, quiz } };
 }
 
 export function submitAnswer(
@@ -233,7 +279,10 @@ export function submitAnswer(
   socketId: string,
   questionId: string,
   optionIndex: number,
-  onResolve: (room: RoomRecord, outcome: QuizOutcomeMessage) => void,
+  onResolve: (
+    room: RoomRecord,
+    outcome: QuizOutcomeMessage | null,
+  ) => void,
 ): { room: RoomRecord } | { error: string } {
   const room = rooms.get(roomId);
   if (!room) return { error: "Комната не найдена." };
@@ -247,9 +296,6 @@ export function submitAnswer(
   const correctIndex = room.currentAnswerIndex;
   if (correctIndex === null) return { error: "Нет ключа ответа." };
 
-  // Each socket controls a team — apply answer to every participant from
-  // that team that has not yet answered. In practice that's at most 1 actor
-  // (your team) or at most 1 defender on the line (opponent team).
   let touched = false;
   for (const p of room.state.quiz.participants) {
     if (p.team !== team) continue;
@@ -263,9 +309,6 @@ export function submitAnswer(
     return { error: "Уже ответили." };
   }
 
-  // Resolve early if everyone has answered, OR if any defender got it correct
-  // (defender correct = instant steal), OR if actor got it correct AND there
-  // are no defenders (or all defenders answered wrong).
   const all = room.state.quiz.participants;
   const allAnswered = all.every((p) => p.answeredOptionIndex !== null);
   const defenderCorrect = all.some(
@@ -288,7 +331,10 @@ export function submitAnswer(
 
 function finalizeQuiz(
   room: RoomRecord,
-  onResolve: (room: RoomRecord, outcome: QuizOutcomeMessage) => void,
+  onResolve: (
+    room: RoomRecord,
+    outcome: QuizOutcomeMessage | null,
+  ) => void,
   _timedOut: boolean,
 ) {
   const quiz = room.state.quiz;
@@ -296,16 +342,13 @@ function finalizeQuiz(
   const correctIndex = room.currentAnswerIndex ?? -1;
 
   const actor = quiz.participants.find((p) => p.role === "actor")!;
-  const defenders = quiz.participants.filter((p) => p.role === "defender");
 
-  // Lock in correctness for any unanswered participants.
   for (const p of quiz.participants) {
     if (p.correct === null) {
       p.correct = false;
     }
   }
 
-  // Earliest correct answer wins.
   const corrects = [...quiz.participants].filter((p) => p.correct);
   corrects.sort(
     (a, b) =>
@@ -326,7 +369,6 @@ function finalizeQuiz(
     const winner = corrects[0];
     winnerId = winner.playerId;
     if (winner.role === "actor") {
-      // Tie-break: if a defender answered at exactly the same ms, favour actor.
       outcomeKey = corrects.find(
         (c) => c.role === "defender" && c.answeredAt === winner.answeredAt,
       )
@@ -335,26 +377,16 @@ function finalizeQuiz(
       const res = applyActorSuccess(room.state, quiz.action);
       description = res.description;
       room.state = res.state;
-      // If it was a shot that resulted in a goal, queue kickoff.
       if (res.goal && room.state.status === "goal") {
-        // Briefly stay in "goal" status for animation, then kickoff for the
-        // conceded team.
         const concededTeam = otherTeam(actor.team);
         setTimeout(() => {
           room.state = kickoffFor(room.state, concededTeam);
           room.state.log.push({
             at: Date.now(),
-            text: `Стартовый удар: команда ${concededTeam}.`,
+            text: `Розыгрыш мяча с центра: команда ${concededTeam}.`,
           });
-          onResolve(room, {
-            questionId: quiz.questionId,
-            correctIndex,
-            participants: quiz.participants,
-            outcome: outcomeKey,
-            winnerId,
-            description: "Розыгрыш мяча с центра.",
-          });
-        }, 1800);
+          onResolve(room, null);
+        }, 2200);
       }
     } else {
       outcomeKey = "defender_win";
@@ -385,7 +417,4 @@ function finalizeQuiz(
     winnerId,
     description: description || "Готово.",
   });
-
-  // Quietly ignore "defenders" variable, just reference it so TS keeps it.
-  void defenders;
 }

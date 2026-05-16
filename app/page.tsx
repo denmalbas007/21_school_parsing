@@ -7,7 +7,7 @@ import { useSocket } from "@/hooks/useSocket";
 import type { PublicRoom } from "@/lib/game/types";
 
 export default function LobbyPage() {
-  const { socket, connected } = useSocket();
+  const { socket, connected, playerId } = useSocket();
   const router = useRouter();
   const [name, setName] = useState("");
   const [rooms, setRooms] = useState<PublicRoom[]>([]);
@@ -41,38 +41,45 @@ export default function LobbyPage() {
   const createRoom = () => {
     if (!socket) return;
     setError(null);
-    socket.emit("lobby:create", { name: name || "Игрок" }, (res) => {
-      if ("error" in res) {
-        setError(res.error);
-        return;
-      }
-      // Auto-join the room we just created.
-      socket.emit(
-        "room:join",
-        { roomId: res.roomId, name: name || "Игрок" },
-        (joinRes) => {
-          if ("error" in joinRes) {
-            setError(joinRes.error);
-            return;
-          }
-          router.push(`/game/${res.roomId}`);
-        },
-      );
-    });
+    socket.emit(
+      "lobby:create",
+      { name: name || "Игрок", playerId },
+      (res) => {
+        if ("error" in res) {
+          setError(res.error);
+          return;
+        }
+        socket.emit(
+          "room:join",
+          { roomId: res.roomId, name: name || "Игрок", playerId },
+          (joinRes) => {
+            if ("error" in joinRes) {
+              setError(joinRes.error);
+              return;
+            }
+            router.push(`/game/${res.roomId}`);
+          },
+        );
+      },
+    );
   };
 
   const joinRoom = (roomId: string) => {
     if (!socket) return;
     setError(null);
     setJoiningId(roomId);
-    socket.emit("room:join", { roomId, name: name || "Игрок" }, (res) => {
-      setJoiningId(null);
-      if ("error" in res) {
-        setError(res.error);
-        return;
-      }
-      router.push(`/game/${roomId}`);
-    });
+    socket.emit(
+      "room:join",
+      { roomId, name: name || "Игрок", playerId },
+      (res) => {
+        setJoiningId(null);
+        if ("error" in res) {
+          setError(res.error);
+          return;
+        }
+        router.push(`/game/${roomId}`);
+      },
+    );
   };
 
   return (
@@ -85,12 +92,26 @@ export default function LobbyPage() {
             transition={{ duration: 0.4 }}
             className="flex items-center gap-3"
           >
-            <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-cyan-400 text-xl">
+            <motion.span
+              animate={{ rotate: [0, -10, 10, -10, 0] }}
+              transition={{
+                duration: 3,
+                repeat: Infinity,
+                repeatDelay: 2,
+                ease: "easeInOut",
+              }}
+              className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-cyan-400 text-2xl shadow-lg shadow-emerald-500/30"
+            >
               ⚽
-            </span>
-            <h1 className="text-3xl font-semibold tracking-tight">
-              QuizBall
-            </h1>
+            </motion.span>
+            <div>
+              <h1 className="text-3xl font-semibold tracking-tight">
+                QuizBall
+              </h1>
+              <p className="text-xs text-zinc-400">
+                Пошаговый футбол × викторины
+              </p>
+            </div>
             <span
               className={`ml-auto inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs ${
                 connected
@@ -100,15 +121,17 @@ export default function LobbyPage() {
             >
               <span
                 className={`h-2 w-2 rounded-full ${
-                  connected ? "bg-emerald-400" : "bg-rose-400"
+                  connected ? "bg-emerald-400 animate-pulse" : "bg-rose-400"
                 }`}
               />
               {connected ? "онлайн" : "подключаемся…"}
             </span>
           </motion.div>
           <p className="text-zinc-400">
-            Пошаговый онлайн-футбол 3×3. Каждый пас, дриблинг и удар
-            разыгрываются викториной — сложность зависит от ситуации на поле.
+            Каждый пас, дриблинг и удар решается через викторину — сложность
+            зависит от дистанции и от того, сколько защитников на линии.
+            Когда соперник пытается перехватить, вы отвечаете одновременно: кто
+            первый прав, тот забирает эпизод.
           </p>
         </header>
 
@@ -126,9 +149,9 @@ export default function LobbyPage() {
           <button
             onClick={createRoom}
             disabled={!connected}
-            className="group relative overflow-hidden rounded-xl bg-gradient-to-r from-emerald-400 to-cyan-400 px-5 py-3 font-medium text-zinc-900 transition-transform hover:scale-[1.01] active:scale-[0.99] disabled:opacity-50"
+            className="group relative overflow-hidden rounded-xl bg-gradient-to-r from-emerald-400 to-cyan-400 px-5 py-3 font-semibold text-zinc-900 transition-transform hover:scale-[1.01] active:scale-[0.99] disabled:opacity-50"
           >
-            Создать новую комнату
+            Создать комнату и пригласить соперника
           </button>
           {error && (
             <div className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-300">
@@ -149,7 +172,7 @@ export default function LobbyPage() {
           </div>
           {rooms.length === 0 ? (
             <div className="glass rounded-2xl p-6 text-zinc-400 text-sm">
-              Открытых комнат пока нет. Создайте свою и поделитесь ссылкой —
+              Свободных комнат нет. Создайте свою и поделитесь ссылкой —
               как только присоединится второй игрок, матч стартует автоматически.
             </div>
           ) : (
@@ -183,9 +206,30 @@ export default function LobbyPage() {
           )}
         </section>
 
-        <footer className="mt-auto pt-10 text-xs text-zinc-500">
-          Подсказка: чтобы сыграть с другом, откройте ту же ссылку в другой
-          вкладке или отправьте код комнаты.
+        <section className="glass rounded-2xl p-5 text-sm text-zinc-300">
+          <h3 className="mb-2 font-medium">Как играть</h3>
+          <ol className="ml-4 list-decimal flex flex-col gap-1 text-zinc-300/90">
+            <li>Команды ходят по очереди. Кто владеет мячом — атакует.</li>
+            <li>
+              На своём ходу с мячом выберите <b>пас</b> / <b>дриблинг</b> /{" "}
+              <b>удар</b>. Появится викторина — нужно ответить быстрее
+              соперника.
+            </li>
+            <li>
+              Если соперник на линии паса/удара — он отвечает одновременно с
+              вами. Перехват = мяч у него.
+            </li>
+            <li>
+              На своём ходу без мяча — двигаете одного игрока на 1 клетку, чтобы
+              перекрыть атаку. Без викторины.
+            </li>
+            <li>До 3 голов.</li>
+          </ol>
+        </section>
+
+        <footer className="mt-auto pt-6 text-xs text-zinc-500">
+          Чтобы сыграть с другом — откройте ту же ссылку игры в его браузере, и
+          партия стартует автоматически.
         </footer>
       </div>
     </main>
