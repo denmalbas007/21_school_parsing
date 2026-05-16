@@ -1,0 +1,79 @@
+@import "tailwindcss";
+
+:root {
+  --background: #050a0d;
+  --foreground: #f7fbfa;
+  --pitch-1: #0a3d23;
+  --pitch-2: #0e5430;
+  --pitch-3: #115d36;
+  --team-a: #22d3ee;
+  --team-b: #f43f5e;
+  --ball: #fbfaf3;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-team-a: var(--team-a);
+  --color-team-b: var(--team-b);
+  --color-ball: var(--ball);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  background:
+    radial-gradient(1200px 800px at 20% -10%, #0b3b2a 0%, transparent 60%),
+    radial-gradient(900px 600px at 110% 110%, #0a2f4a 0%, transparent 60%),
+    linear-gradient(180deg, #050a0d 0%, #07141a 100%);
+  color: var(--foreground);
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+/* Subtle scrollbar so log/lobby look cleaner */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.pitch-bg {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--pitch-1) 0 60px,
+      var(--pitch-2) 60px 120px
+    );
+}
+
+.glass {
+  background: rgba(10, 18, 24, 0.65);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glow-a {
+  box-shadow:
+    0 0 0 2px rgba(34, 211, 238, 0.45),
+    0 0 24px rgba(34, 211, 238, 0.55);
+}
+.glow-b {
+  box-shadow:
+    0 0 0 2px rgba(244, 63, 94, 0.45),
+    0 0 24px rgba(244, 63, 94, 0.55);
+}
