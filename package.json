@@ -2,6 +2,9 @@
   "name": "21_school_parsing",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "build": "next build",
@@ -20,6 +23,7 @@
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
     "tailwind-merge": "^3.6.0",
+    "tsx": "^4.22.0",
     "zustand": "^5.0.13"
   },
   "devDependencies": {
@@ -30,7 +34,6 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "tailwindcss": "^4",
-    "tsx": "^4.22.0",
     "typescript": "^5"
   }
 }
