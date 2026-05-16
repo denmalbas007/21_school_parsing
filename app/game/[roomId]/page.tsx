@@ -2,11 +2,11 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useParams, useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActionPanel, type ActionMode } from "@/components/ActionPanel";
 import { GameLog } from "@/components/GameLog";
 import { GoalCelebration } from "@/components/GoalCelebration";
-import { Pitch } from "@/components/Pitch";
 import { QuizModal } from "@/components/QuizModal";
 import { Scoreboard } from "@/components/Scoreboard";
 import { useSocket } from "@/hooks/useSocket";
@@ -15,6 +15,7 @@ import {
   findPlayerById,
   passTargets as computePassTargets,
   relocateTargets as computeRelocateTargets,
+  sprintTargets as computeSprintTargets,
 } from "@/lib/game/engine";
 import type {
   PendingAction,
@@ -24,6 +25,19 @@ import type {
   QuizOutcomeMessage,
   Team,
 } from "@/lib/game/types";
+
+// Pitch3D uses three.js — load it client-only to avoid SSR noise.
+const Pitch3D = dynamic(
+  () => import("@/components/Pitch3D").then((m) => m.Pitch3D),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="mx-auto aspect-[16/10] w-full max-w-[760px] glass rounded-2xl flex items-center justify-center text-zinc-400">
+        Загружаем 3D-поле…
+      </div>
+    ),
+  },
+);
 
 export default function GamePage() {
   const params = useParams<{ roomId: string }>();
@@ -69,7 +83,6 @@ export default function GamePage() {
     );
   }, [socket, connected, roomId, playerId]);
 
-  // Subscribe to room state + outcomes.
   useEffect(() => {
     if (!socket) return;
     const onRoomState = (r: PublicRoom) => {
@@ -80,6 +93,7 @@ export default function GamePage() {
     };
     const onOutcome = (msg: QuizOutcomeMessage) => {
       setLastOutcome(msg);
+      playOutcomeSound(msg);
       setTimeout(() => {
         setLastOutcome((cur) =>
           cur?.questionId === msg.questionId ? null : cur,
@@ -101,16 +115,14 @@ export default function GamePage() {
 
   const state = room?.state ?? null;
 
-  // Detect goal / win and trigger the celebration overlay.
   useEffect(() => {
     if (!state) return;
     const prev = prevScoreRef.current;
     const scoredTeam: Team | null =
       state.score.A > prev.A ? "A" : state.score.B > prev.B ? "B" : null;
     if (scoredTeam) {
-      const isWin =
-        state.winner === scoredTeam || prevWinnerRef.current !== state.winner;
       const winnerJust = state.winner === scoredTeam;
+      playGoalSound();
       setGoalShow({
         team: scoredTeam,
         scorerLabel: winnerJust ? "Финальный счёт" : "",
@@ -120,7 +132,6 @@ export default function GamePage() {
         () => setGoalShow(null),
         winnerJust ? 4500 : 2200,
       );
-      void isWin;
     }
     prevScoreRef.current = { ...state.score };
     prevWinnerRef.current = state.winner;
@@ -138,7 +149,8 @@ export default function GamePage() {
   const myTurn = state !== null && mySeatTeam !== null && state.turn === mySeatTeam;
 
   const passTargets = useMemo(() => {
-    if (!state || !carrier || mode !== "pass") return [];
+    if (!state || !carrier) return [];
+    if (mode !== "pass" && mode !== "lob") return [];
     if (!iHaveBall) return [];
     return computePassTargets(state, carrier).map((p) => p.id);
   }, [state, carrier, mode, iHaveBall]);
@@ -147,6 +159,12 @@ export default function GamePage() {
     if (!state || !carrier || mode !== "dribble") return [];
     if (!iHaveBall) return [];
     return computeDribbleTargets(state, carrier);
+  }, [state, carrier, mode, iHaveBall]);
+
+  const sprintTargets: Position[] = useMemo(() => {
+    if (!state || !carrier || mode !== "sprint") return [];
+    if (!iHaveBall) return [];
+    return computeSprintTargets(state, carrier);
   }, [state, carrier, mode, iHaveBall]);
 
   const relocateTargets: Position[] = useMemo(() => {
@@ -159,6 +177,7 @@ export default function GamePage() {
   const submitAction = useCallback(
     (action: PendingAction) => {
       if (!socket) return;
+      playActionSound(action.type);
       socket.emit("game:action", { roomId, action }, (res) => {
         if ("error" in res) setError(res.error);
         else setError(null);
@@ -172,9 +191,22 @@ export default function GamePage() {
   const handleSelectPlayer = useCallback(
     (target: PlayerState) => {
       if (!state || !mySeatTeam) return;
-      if (mode === "pass" && carrier && target.team === carrier.team && target.id !== carrier.id) {
-        submitAction({ type: "pass", from: carrier.id, to: target.id });
-      } else if (mode === "relocate" && target.team === mySeatTeam) {
+      if (
+        (mode === "pass" || mode === "lob") &&
+        carrier &&
+        target.team === carrier.team &&
+        target.id !== carrier.id
+      ) {
+        submitAction({
+          type: mode === "lob" ? "lob" : "pass",
+          from: carrier.id,
+          to: target.id,
+        });
+      } else if (
+        mode === "relocate" &&
+        target.team === mySeatTeam &&
+        target.id !== state.ballCarrierId
+      ) {
         setSelectedRelocateId(target.id);
       }
     },
@@ -185,6 +217,8 @@ export default function GamePage() {
     (pos: Position) => {
       if (mode === "dribble" && carrier) {
         submitAction({ type: "dribble", from: carrier.id, toPos: pos });
+      } else if (mode === "sprint" && carrier) {
+        submitAction({ type: "sprint", from: carrier.id, toPos: pos });
       } else if (mode === "relocate" && selectedRelocateId) {
         submitAction({
           type: "relocate",
@@ -206,6 +240,7 @@ export default function GamePage() {
   const handleAnswer = useCallback(
     (questionId: string, optionIndex: number) => {
       if (!socket) return;
+      playTickSound();
       socket.emit(
         "quiz:answer",
         { roomId, questionId, optionIndex },
@@ -244,8 +279,8 @@ export default function GamePage() {
     if (state.status === "quiz") return "Идёт викторина";
     if (state.status === "goal") return "ГОЛ! Розыгрыш с центра…";
     if (myTurn) {
-      if (iHaveBall) return "Ваш ход — атакуйте с мячом";
-      return "Ваш ход — переместите игрока в защиту";
+      if (iHaveBall) return "Ваш ход — у вас мяч";
+      return "Ваш ход — без мяча, занимайте позицию";
     }
     return `Ход соперника (${state.turn})`;
   })();
@@ -315,12 +350,13 @@ export default function GamePage() {
           </motion.div>
         )}
 
-        <Pitch
+        <Pitch3D
           state={state}
           mySeatTeam={mySeatTeam}
           selectedRelocatePlayerId={selectedRelocateId}
           passTargetIds={passTargets}
           dribbleTargets={dribbleTargets}
+          sprintTargets={sprintTargets}
           relocateTargets={relocateTargets}
           canShoot={mode === "shoot"}
           highlightActionMode={mode}
@@ -368,4 +404,81 @@ export default function GamePage() {
       />
     </main>
   );
+}
+
+// ---- Tiny Web Audio sound effects -----------------------------------------
+
+let audioCtx: AudioContext | null = null;
+function ac(): AudioContext | null {
+  if (typeof window === "undefined") return null;
+  if (!audioCtx) {
+    const Ctor =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return null;
+    audioCtx = new Ctor();
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+
+function beep(freq: number, durMs: number, type: OscillatorType = "sine", gain = 0.08) {
+  const ctx = ac();
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  g.gain.value = 0;
+  osc.connect(g).connect(ctx.destination);
+  const t0 = ctx.currentTime;
+  g.gain.linearRampToValueAtTime(gain, t0 + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + durMs / 1000);
+  osc.start(t0);
+  osc.stop(t0 + durMs / 1000 + 0.02);
+}
+
+function playActionSound(kind: string) {
+  switch (kind) {
+    case "pass":
+      beep(520, 80, "triangle");
+      break;
+    case "lob":
+      beep(420, 140, "sine");
+      setTimeout(() => beep(600, 140, "sine"), 100);
+      break;
+    case "dribble":
+      beep(340, 70, "square", 0.05);
+      break;
+    case "sprint":
+      beep(380, 90, "sawtooth", 0.06);
+      setTimeout(() => beep(440, 80, "sawtooth", 0.05), 80);
+      break;
+    case "shoot":
+      beep(220, 220, "sawtooth", 0.1);
+      break;
+    case "relocate":
+      beep(260, 60, "sine", 0.04);
+      break;
+  }
+}
+
+function playTickSound() {
+  beep(720, 50, "sine", 0.06);
+}
+
+function playGoalSound() {
+  beep(523, 180, "triangle", 0.12);
+  setTimeout(() => beep(659, 180, "triangle", 0.12), 150);
+  setTimeout(() => beep(784, 280, "triangle", 0.12), 300);
+}
+
+function playOutcomeSound(msg: QuizOutcomeMessage) {
+  if (msg.outcome === "actor_win" || msg.outcome === "tie_to_actor") {
+    beep(660, 100, "sine", 0.07);
+  } else if (msg.outcome === "defender_win") {
+    beep(180, 220, "square", 0.07);
+  } else {
+    beep(120, 200, "triangle", 0.05);
+  }
 }

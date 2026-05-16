@@ -5,7 +5,14 @@ import type { GameState, PlayerState, Team } from "@/lib/game/types";
 import { canShoot } from "@/lib/game/engine";
 import { cn } from "@/lib/utils";
 
-export type ActionMode = "pass" | "dribble" | "shoot" | "relocate" | null;
+export type ActionMode =
+  | "pass"
+  | "lob"
+  | "dribble"
+  | "sprint"
+  | "shoot"
+  | "relocate"
+  | null;
 
 interface ActionPanelProps {
   state: GameState;
@@ -58,49 +65,62 @@ export function ActionPanel({
         )}
       </div>
 
-      {myTurn && !iHaveBall ? (
-        <div className="space-y-3">
-          <p className="text-xs text-zinc-400">
-            Мяч у соперника. Сдвиньте одного из ваших игроков, чтобы перекрыть
-            атаку или подойти к мячу.
-          </p>
-          <ActionButton
-            label="Переместить игрока"
-            subtitle="на 1 клетку · без викторины"
-            accent="sky"
-            active={mode === "relocate"}
-            disabled={disabled}
-            onClick={() => onSetMode(mode === "relocate" ? null : "relocate")}
-          />
-        </div>
-      ) : (
-        <div className="grid grid-cols-3 gap-2">
-          <ActionButton
-            label="Пас"
-            subtitle="выберите партнёра"
-            accent="emerald"
-            active={mode === "pass"}
-            disabled={disabled || !iHaveBall}
-            onClick={() => onSetMode(mode === "pass" ? null : "pass")}
-          />
-          <ActionButton
-            label="Дриблинг"
-            subtitle="на 1 клетку"
-            accent="amber"
-            active={mode === "dribble"}
-            disabled={disabled || !iHaveBall}
-            onClick={() => onSetMode(mode === "dribble" ? null : "dribble")}
-          />
-          <ActionButton
-            label="Удар"
-            subtitle={shootAvailable ? "по воротам" : "слишком далеко"}
-            accent="rose"
-            active={mode === "shoot"}
-            disabled={disabled || !shootAvailable}
-            onClick={() => onSetMode(mode === "shoot" ? null : "shoot")}
-          />
-        </div>
-      )}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {iHaveBall && myTurn && (
+          <>
+            <ActionButton
+              label="Пас"
+              subtitle="на партнёра"
+              accent="emerald"
+              active={mode === "pass"}
+              disabled={disabled}
+              onClick={() => onSetMode(mode === "pass" ? null : "pass")}
+            />
+            <ActionButton
+              label="Навес"
+              subtitle="над защитой"
+              accent="violet"
+              active={mode === "lob"}
+              disabled={disabled}
+              onClick={() => onSetMode(mode === "lob" ? null : "lob")}
+            />
+            <ActionButton
+              label="Дриблинг"
+              subtitle="1 клетка"
+              accent="amber"
+              active={mode === "dribble"}
+              disabled={disabled}
+              onClick={() => onSetMode(mode === "dribble" ? null : "dribble")}
+            />
+            <ActionButton
+              label="Спринт"
+              subtitle="2 клетки прямо"
+              accent="orange"
+              active={mode === "sprint"}
+              disabled={disabled}
+              onClick={() => onSetMode(mode === "sprint" ? null : "sprint")}
+            />
+            <ActionButton
+              label="Удар"
+              subtitle={shootAvailable ? "по воротам" : "далеко"}
+              accent="rose"
+              active={mode === "shoot"}
+              disabled={disabled || !shootAvailable}
+              onClick={() => onSetMode(mode === "shoot" ? null : "shoot")}
+            />
+          </>
+        )}
+        <ActionButton
+          label="Передвинуть"
+          subtitle={
+            iHaveBall ? "партнёра без мяча" : "любого игрока"
+          }
+          accent="sky"
+          active={mode === "relocate"}
+          disabled={disabled}
+          onClick={() => onSetMode(mode === "relocate" ? null : "relocate")}
+        />
+      </div>
 
       {disabled && (
         <p className="mt-3 text-xs text-zinc-400">
@@ -111,6 +131,19 @@ export function ActionPanel({
               : state.status === "quiz"
                 ? "Идёт викторина — ответьте на вопрос."
                 : ""}
+        </p>
+      )}
+
+      {!disabled && mode && (
+        <p className="mt-3 text-xs text-zinc-400">
+          {mode === "pass" && "Выберите партнёра — линии паса покажут возможности."}
+          {mode === "lob" && "Выберите партнёра — навес идёт над защитниками, но викторина сложнее."}
+          {mode === "dribble" && "Кликните на жёлтую клетку. Защитник рядом — викторина."}
+          {mode === "sprint" && "Кликните оранжевую клетку (2 клетки в одном направлении)."}
+          {mode === "shoot" && "Кликните светящийся мяч у ворот соперника."}
+          {mode === "relocate" && (iHaveBall
+            ? "Выберите своего игрока без мяча, потом клетку рядом."
+            : "Выберите своего игрока, потом клетку рядом — без викторины.")}
         </p>
       )}
     </div>
@@ -127,7 +160,7 @@ function ActionButton({
 }: {
   label: string;
   subtitle: string;
-  accent: "emerald" | "amber" | "rose" | "sky";
+  accent: "emerald" | "amber" | "rose" | "sky" | "violet" | "orange";
   active: boolean;
   disabled: boolean;
   onClick: () => void;
@@ -140,14 +173,12 @@ function ActionButton({
       className={cn(
         "flex flex-col items-start rounded-xl px-3 py-2 text-left transition-all",
         "border border-white/10 bg-white/5 hover:bg-white/10",
-        active && accent === "emerald" &&
-          "border-emerald-400/60 bg-emerald-400/15",
-        active && accent === "amber" &&
-          "border-amber-400/60 bg-amber-400/15",
-        active && accent === "rose" &&
-          "border-rose-400/60 bg-rose-400/15",
-        active && accent === "sky" &&
-          "border-sky-400/60 bg-sky-400/15",
+        active && accent === "emerald" && "border-emerald-400/60 bg-emerald-400/15",
+        active && accent === "amber" && "border-amber-400/60 bg-amber-400/15",
+        active && accent === "rose" && "border-rose-400/60 bg-rose-400/15",
+        active && accent === "sky" && "border-sky-400/60 bg-sky-400/15",
+        active && accent === "violet" && "border-violet-400/60 bg-violet-400/15",
+        active && accent === "orange" && "border-orange-400/60 bg-orange-400/15",
         disabled && "cursor-not-allowed opacity-50 hover:bg-white/5",
       )}
     >

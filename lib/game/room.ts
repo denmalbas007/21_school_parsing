@@ -8,17 +8,25 @@ import {
   dribbleDifficulty,
   findPlayerById,
   kickoffFor,
+  lobDifficulty,
   otherTeam,
   passDifficulty,
   shotDifficulty,
+  sprintDifficulty,
   validateAction,
 } from "./engine";
-import { getCorrectIndex, pickQuestion, quizDurationMs } from "./quiz";
+import {
+  getCorrectIndex,
+  getQuestionCategory,
+  pickQuestion,
+  quizDurationMs,
+} from "./quiz";
 import type {
   ActiveQuiz,
   GameState,
   PendingAction,
   PublicRoom,
+  QuestionCategory,
   QuizOutcomeMessage,
   QuizParticipant,
   SeatInfo,
@@ -30,15 +38,11 @@ interface RoomRecord {
   seats: SeatInfo[];
   state: GameState;
   quizTimer: NodeJS.Timeout | null;
-  // Server-side answer key for the current quiz (we never expose it).
   currentAnswerIndex: number | null;
-  // Tracks pending GC after all players disconnect.
   gcTimer: NodeJS.Timeout | null;
 }
 
 const rooms = new Map<string, RoomRecord>();
-
-// Reverse index: socketId → roomId (helps cleanup on disconnect).
 const socketToRoom = new Map<string, string>();
 
 export function listOpenRooms(): PublicRoom[] {
@@ -86,13 +90,11 @@ export function joinRoom(
   const room = rooms.get(roomId);
   if (!room) return { error: "Комната не найдена." };
 
-  // Cancel any pending GC since someone is connecting now.
   if (room.gcTimer) {
     clearTimeout(room.gcTimer);
     room.gcTimer = null;
   }
 
-  // Reconnect path: same stable playerId already seated.
   const existing = room.seats.find((s) => s.playerId === playerId);
   if (existing) {
     if (existing.socketId && existing.socketId !== socketId) {
@@ -130,8 +132,6 @@ export function joinRoom(
   return { room, seat };
 }
 
-// Called on socket disconnect. Marks the seat offline but keeps it so the
-// player can reconnect under their stable playerId within the grace window.
 export function markSocketDisconnected(socketId: string): RoomRecord[] {
   const affected: RoomRecord[] = [];
   const roomId = socketToRoom.get(socketId);
@@ -149,7 +149,6 @@ export function markSocketDisconnected(socketId: string): RoomRecord[] {
   });
   affected.push(room);
 
-  // Schedule GC if everyone is offline.
   if (room.seats.every((s) => !s.connected)) {
     if (room.gcTimer) clearTimeout(room.gcTimer);
     room.gcTimer = setTimeout(() => {
@@ -175,8 +174,6 @@ export interface QuizStartResult {
   quiz: ActiveQuiz;
 }
 
-// Returns either a quiz-start result, an immediate-resolution result (for
-// `relocate`), or an error.
 export function startQuizForAction(
   roomId: string,
   socketId: string,
@@ -215,16 +212,29 @@ export function startQuizForAction(
     const d = passDifficulty(room.state, actor, target);
     difficulty = d.difficulty;
     defenders = d.defenders.map((p) => ({ id: p.id, team: p.team }));
+  } else if (action.type === "lob") {
+    const target = findPlayerById(room.state, action.to)!;
+    const d = lobDifficulty(room.state, actor, target);
+    difficulty = d.difficulty;
+    defenders = d.defenders.map((p) => ({ id: p.id, team: p.team }));
   } else if (action.type === "dribble") {
-    difficulty = dribbleDifficulty().difficulty;
+    const d = dribbleDifficulty(room.state, actor, action.toPos);
+    difficulty = d.difficulty;
+    defenders = d.defenders.map((p) => ({ id: p.id, team: p.team }));
+  } else if (action.type === "sprint") {
+    const d = sprintDifficulty(room.state, actor, action.toPos);
+    difficulty = d.difficulty;
+    defenders = d.defenders.map((p) => ({ id: p.id, team: p.team }));
   } else {
     const d = shotDifficulty(room.state, actor);
     difficulty = d.difficulty;
     defenders = d.defenders.map((p) => ({ id: p.id, team: p.team }));
   }
 
-  const question = pickQuestion(difficulty);
+  const question = pickQuestion(difficulty, room.id);
   const correctIndex = getCorrectIndex(question.id)!;
+  const category =
+    getQuestionCategory(question.id) ?? (question.category as QuestionCategory);
 
   const startedAt = Date.now();
   const deadlineAt = startedAt + quizDurationMs(difficulty);
@@ -253,6 +263,7 @@ export function startQuizForAction(
     prompt: question.prompt,
     options: question.options,
     difficulty,
+    category,
     startedAt,
     deadlineAt,
     action,
@@ -386,7 +397,7 @@ function finalizeQuiz(
             text: `Розыгрыш мяча с центра: команда ${concededTeam}.`,
           });
           onResolve(room, null);
-        }, 2200);
+        }, 2500);
       }
     } else {
       outcomeKey = "defender_win";

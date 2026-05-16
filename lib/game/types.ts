@@ -23,13 +23,31 @@ export interface SeatInfo {
   connected: boolean;
 }
 
-export type ActionType = "pass" | "dribble" | "shoot" | "relocate";
+export type ActionType =
+  | "pass"
+  | "lob"
+  | "dribble"
+  | "sprint"
+  | "shoot"
+  | "relocate";
 
 export type PendingAction =
   | { type: "pass"; from: string; to: string }
+  | { type: "lob"; from: string; to: string }
   | { type: "dribble"; from: string; toPos: Position }
+  | { type: "sprint"; from: string; toPos: Position }
   | { type: "shoot"; from: string }
   | { type: "relocate"; from: string; toPos: Position };
+
+export type QuestionCategory =
+  | "football"
+  | "sports"
+  | "history"
+  | "geography"
+  | "science"
+  | "culture"
+  | "tech"
+  | "math";
 
 export interface QuizQuestion {
   id: string;
@@ -37,6 +55,7 @@ export interface QuizQuestion {
   options: string[];
   correctIndex: number;
   difficulty: Difficulty;
+  category: QuestionCategory;
   source: "local" | "opentdb";
 }
 
@@ -54,6 +73,7 @@ export interface ActiveQuiz {
   prompt: string;
   options: string[];
   difficulty: Difficulty;
+  category: QuestionCategory;
   startedAt: number;
   deadlineAt: number;
   action: PendingAction;
@@ -95,6 +115,14 @@ export interface GameState {
   turnNumber: number;
   goalTarget: number;
   winner: Team | null;
+  // Visual hint for the client: where the ball is travelling, used for arc anim.
+  ballAnim: {
+    fromPos: Position;
+    toPos: Position;
+    kind: "pass" | "lob" | "dribble" | "sprint" | "shoot";
+    startedAt: number;
+    durationMs: number;
+  } | null;
 }
 
 export interface PublicRoom {

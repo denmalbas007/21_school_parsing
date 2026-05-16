@@ -2,6 +2,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useMemo, useState } from "react";
+import { CATEGORY_LABELS } from "@/data/questions";
 import type {
   ActiveQuiz,
   QuizOutcomeMessage,
@@ -75,10 +76,13 @@ export function QuizModal({
             <div className="mb-4 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <DifficultyChip difficulty={quiz.difficulty} />
+                <span className="rounded-full bg-white/10 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-zinc-300">
+                  {CATEGORY_LABELS[quiz.category] ?? quiz.category}
+                </span>
                 <span className="text-xs text-zinc-400">
                   {quiz.participants.length === 1
-                    ? "только вы"
-                    : `${quiz.participants.length} участника`}
+                    ? "соло"
+                    : `${quiz.participants.length} участн.`}
                 </span>
               </div>
               <CountdownRing

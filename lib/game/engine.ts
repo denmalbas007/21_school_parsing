@@ -62,6 +62,22 @@ export function opponentsOf(state: GameState, team: Team): PlayerState[] {
   return state.players.filter((p) => p.team !== team);
 }
 
+function chebyshev(a: Position, b: Position): number {
+  return Math.max(Math.abs(a.col - b.col), Math.abs(a.row - b.row));
+}
+
+// Opponents within Chebyshev distance 1 of any cell in `cells`.
+function defendersNearCells(
+  state: GameState,
+  cells: Position[],
+  actorTeam: Team,
+): PlayerState[] {
+  const opponents = state.players.filter((p) => p.team !== actorTeam);
+  return opponents.filter((p) =>
+    cells.some((c) => chebyshev(c, p.pos) <= 1),
+  );
+}
+
 // ---- Difficulty heuristics -------------------------------------------------
 
 export function passDifficulty(
@@ -69,7 +85,7 @@ export function passDifficulty(
   from: PlayerState,
   to: PlayerState,
 ): { difficulty: Difficulty; defenders: PlayerState[] } {
-  const dist = manhattan(from.pos, to.pos);
+  const dist = chebyshev(from.pos, to.pos);
   const defenders = defendersOnLine(state, from.pos, to.pos, from.team);
   let difficulty: Difficulty;
   if (dist <= 2 && defenders.length === 0) difficulty = "easy";
@@ -78,8 +94,49 @@ export function passDifficulty(
   return { difficulty, defenders };
 }
 
-export function dribbleDifficulty(): { difficulty: Difficulty } {
-  return { difficulty: "easy" };
+// Lob is a chip pass that flies over defenders — they don't compete.
+// But it takes longer / harder to be precise, so base difficulty is bumped.
+export function lobDifficulty(
+  _state: GameState,
+  from: PlayerState,
+  to: PlayerState,
+): { difficulty: Difficulty; defenders: PlayerState[] } {
+  const dist = chebyshev(from.pos, to.pos);
+  let difficulty: Difficulty;
+  if (dist <= 2) difficulty = "medium";
+  else if (dist <= 5) difficulty = "hard";
+  else difficulty = "hard";
+  return { difficulty, defenders: [] };
+}
+
+// Dribble: 1 cell. Defenders adjacent to destination contest.
+export function dribbleDifficulty(
+  state: GameState,
+  from: PlayerState,
+  toPos: Position,
+): { difficulty: Difficulty; defenders: PlayerState[] } {
+  const defenders = defendersNearCells(state, [toPos], from.team);
+  let difficulty: Difficulty;
+  if (defenders.length === 0) difficulty = "easy";
+  else if (defenders.length === 1) difficulty = "medium";
+  else difficulty = "hard";
+  return { difficulty, defenders };
+}
+
+// Sprint: 2 cells straight. Defenders adjacent to either path cell contest.
+export function sprintDifficulty(
+  state: GameState,
+  from: PlayerState,
+  toPos: Position,
+): { difficulty: Difficulty; defenders: PlayerState[]; midPos: Position } {
+  const dc = Math.sign(toPos.col - from.pos.col);
+  const dr = Math.sign(toPos.row - from.pos.row);
+  const midPos = { col: from.pos.col + dc, row: from.pos.row + dr };
+  const defenders = defendersNearCells(state, [midPos, toPos], from.team);
+  let difficulty: Difficulty;
+  if (defenders.length === 0) difficulty = "medium";
+  else difficulty = "hard";
+  return { difficulty, defenders, midPos };
 }
 
 export function shotDifficulty(
@@ -101,14 +158,12 @@ export function shotDifficulty(
   return { difficulty, defenders, shotTarget };
 }
 
-export function canShoot(state: GameState, from: PlayerState): boolean {
+export function canShoot(_state: GameState, from: PlayerState): boolean {
   if (from.team === "A") return from.pos.col >= COLS - 3;
   return from.pos.col <= 2;
 }
 
-// The opponents who sit on (or right next to) the straight line between
-// passer / shooter and the destination. They are the candidates to
-// intercept.
+// Opponents whose cells lie close to the straight line between `from` and `to`.
 export function defendersOnLine(
   state: GameState,
   from: Position,
@@ -118,10 +173,7 @@ export function defendersOnLine(
   const cells = lineCells(from, to);
   const opponents = state.players.filter((p) => p.team !== actorTeam);
   return opponents.filter((p) =>
-    cells.some(
-      (c) =>
-        Math.abs(c.col - p.pos.col) + Math.abs(c.row - p.pos.row) <= 1,
-    ),
+    cells.some((c) => chebyshev(c, p.pos) <= 1),
   );
 }
 
@@ -170,6 +222,7 @@ export function createInitialState(roomId: string): GameState {
     turnNumber: 0,
     goalTarget: GOAL_TARGET,
     winner: null,
+    ballAnim: null,
   };
 }
 
@@ -188,6 +241,7 @@ export function kickoffFor(state: GameState, kickoffTeam: Team): GameState {
   next.activePlayerId = carrier.id;
   next.status = "play";
   next.turnNumber += 1;
+  next.ballAnim = null;
   return next;
 }
 
@@ -211,8 +265,27 @@ export function dribbleTargets(
   return out;
 }
 
-// Cells a non-carrier player can relocate to during the off-ball turn.
-// Same as dribble: 1 cell in any of 8 directions, must be empty.
+// Sprint moves 2 cells in the same direction. Both cells must be empty.
+export function sprintTargets(
+  state: GameState,
+  player: PlayerState,
+): Position[] {
+  const out: Position[] = [];
+  for (let dc = -1; dc <= 1; dc++) {
+    for (let dr = -1; dr <= 1; dr++) {
+      if (dc === 0 && dr === 0) continue;
+      const mid = { col: player.pos.col + dc, row: player.pos.row + dr };
+      const dst = { col: player.pos.col + 2 * dc, row: player.pos.row + 2 * dr };
+      if (dst.col < 0 || dst.col >= COLS) continue;
+      if (dst.row < 0 || dst.row >= ROWS) continue;
+      if (findPlayerAt(state, mid)) continue;
+      if (findPlayerAt(state, dst)) continue;
+      out.push(dst);
+    }
+  }
+  return out;
+}
+
 export function relocateTargets(
   state: GameState,
   player: PlayerState,
@@ -256,10 +329,11 @@ export function validateAction(
     findPlayerById(state, state.ballCarrierId)?.team === actorSocketTeam;
 
   if (action.type === "relocate") {
-    if (myTeamHasBall) {
+    // Cannot relocate the ball carrier (use dribble for that).
+    if (actor.id === state.ballCarrierId) {
       return {
         ok: false,
-        reason: "У вас мяч — выберите пас, дриблинг или удар.",
+        reason: "Носителя мяча нельзя двигать relocate'ом — используйте дриблинг.",
       };
     }
     const dx = Math.abs(action.toPos.col - actor.pos.col);
@@ -281,7 +355,6 @@ export function validateAction(
     return { ok: true };
   }
 
-  // The remaining actions require the player to be the ball carrier.
   if (!myTeamHasBall) {
     return {
       ok: false,
@@ -292,7 +365,7 @@ export function validateAction(
     return { ok: false, reason: "Этот игрок не владеет мячом." };
   }
 
-  if (action.type === "pass") {
+  if (action.type === "pass" || action.type === "lob") {
     const target = findPlayerById(state, action.to);
     if (!target) return { ok: false, reason: "Получатель не найден." };
     if (target.team !== actor.team)
@@ -301,6 +374,7 @@ export function validateAction(
       return { ok: false, reason: "Нельзя пасовать самому себе." };
     return { ok: true };
   }
+
   if (action.type === "dribble") {
     const dx = Math.abs(action.toPos.col - actor.pos.col);
     const dy = Math.abs(action.toPos.row - actor.pos.row);
@@ -320,6 +394,41 @@ export function validateAction(
     }
     return { ok: true };
   }
+
+  if (action.type === "sprint") {
+    const dx = action.toPos.col - actor.pos.col;
+    const dy = action.toPos.row - actor.pos.row;
+    const stepDx = Math.sign(dx);
+    const stepDy = Math.sign(dy);
+    if (
+      (Math.abs(dx) !== 2 && Math.abs(dx) !== 0) ||
+      (Math.abs(dy) !== 2 && Math.abs(dy) !== 0) ||
+      (dx === 0 && dy === 0) ||
+      // diagonal sprint must be exactly 2-2, orthogonal exactly 2-0/0-2
+      (Math.abs(dx) === 2 && Math.abs(dy) === 1) ||
+      (Math.abs(dx) === 1 && Math.abs(dy) === 2)
+    ) {
+      return {
+        ok: false,
+        reason: "Спринт — ровно 2 клетки в одном направлении.",
+      };
+    }
+    const mid = { col: actor.pos.col + stepDx, row: actor.pos.row + stepDy };
+    if (
+      action.toPos.col < 0 ||
+      action.toPos.col >= COLS ||
+      action.toPos.row < 0 ||
+      action.toPos.row >= ROWS
+    ) {
+      return { ok: false, reason: "Спринт уходит за поле." };
+    }
+    if (findPlayerAt(state, mid))
+      return { ok: false, reason: "Промежуточная клетка занята." };
+    if (findPlayerAt(state, action.toPos))
+      return { ok: false, reason: "Конечная клетка занята." };
+    return { ok: true };
+  }
+
   if (action.type === "shoot") {
     if (!canShoot(state, actor)) {
       return { ok: false, reason: "Слишком далеко для удара." };
@@ -337,12 +446,10 @@ export interface ResolutionResult {
   goal: boolean;
 }
 
-// All actions always end the acting team's turn — strict alternation.
-function flipTurn(state: GameState, actingTeam: Team): Team {
+function flipTurn(_state: GameState, actingTeam: Team): Team {
   return otherTeam(actingTeam);
 }
 
-// Non-quiz action: relocate a non-carrier player one cell.
 export function applyRelocate(
   state: GameState,
   action: { type: "relocate"; from: string; toPos: Position },
@@ -364,6 +471,7 @@ export function applyRelocate(
       { at: Date.now(), text: `${badge(actor)} занял позицию.` },
     ],
     quiz: null,
+    ballAnim: null,
   };
   return { state: next, description: "Позиция занята", goal: false };
 }
@@ -377,15 +485,15 @@ export function applyActorSuccess(
     return { state, description: "Игрок не найден", goal: false };
   }
 
-  if (action.type === "pass") {
+  if (action.type === "pass" || action.type === "lob") {
     const target = findPlayerById(state, action.to);
-    if (!target) return { state, description: "Принимающий пропал", goal: false };
+    if (!target)
+      return { state, description: "Принимающий пропал", goal: false };
     const next: GameState = {
       ...state,
       ballCarrierId: target.id,
       ballPos: { ...target.pos },
       activePlayerId: target.id,
-      // Strict alternation — opponent gets a turn (positioning) before we act again.
       turn: flipTurn(state, actor.team),
       status: "play",
       turnNumber: state.turnNumber + 1,
@@ -393,15 +501,30 @@ export function applyActorSuccess(
         ...state.log,
         {
           at: Date.now(),
-          text: `${badge(actor)} → пас на ${badge(target)} принят.`,
+          text:
+            action.type === "lob"
+              ? `${badge(actor)} 🪂 навес на ${badge(target)} принят.`
+              : `${badge(actor)} → пас на ${badge(target)} принят.`,
         },
       ],
       quiz: null,
+      ballAnim: {
+        fromPos: { ...actor.pos },
+        toPos: { ...target.pos },
+        kind: action.type,
+        startedAt: Date.now(),
+        durationMs: 650,
+      },
     };
-    return { state: next, description: `Пас принят: ${badge(target)}`, goal: false };
+    return {
+      state: next,
+      description:
+        action.type === "lob" ? "Навес доставлен" : "Пас принят",
+      goal: false,
+    };
   }
 
-  if (action.type === "dribble") {
+  if (action.type === "dribble" || action.type === "sprint") {
     const movedPlayers = state.players.map((p) =>
       p.id === actor.id ? { ...p, pos: { ...action.toPos } } : p,
     );
@@ -415,11 +538,29 @@ export function applyActorSuccess(
       turnNumber: state.turnNumber + 1,
       log: [
         ...state.log,
-        { at: Date.now(), text: `${badge(actor)} прошёл в дриблинге.` },
+        {
+          at: Date.now(),
+          text:
+            action.type === "sprint"
+              ? `${badge(actor)} 🏃 прорвался на 2 клетки.`
+              : `${badge(actor)} прошёл в дриблинге.`,
+        },
       ],
       quiz: null,
+      ballAnim: {
+        fromPos: { ...actor.pos },
+        toPos: { ...action.toPos },
+        kind: action.type,
+        startedAt: Date.now(),
+        durationMs: 450,
+      },
     };
-    return { state: next, description: "Дриблинг удался", goal: false };
+    return {
+      state: next,
+      description:
+        action.type === "sprint" ? "Спринт удался" : "Дриблинг удался",
+      goal: false,
+    };
   }
 
   if (action.type === "shoot") {
@@ -446,6 +587,13 @@ export function applyActorSuccess(
         },
       ],
       quiz: null,
+      ballAnim: {
+        fromPos: { ...actor.pos },
+        toPos: goalCenter(otherTeam(actor.team)),
+        kind: "shoot",
+        startedAt: Date.now(),
+        durationMs: 600,
+      },
     };
     return { state: next, description: "Гол!", goal: true };
   }
@@ -457,9 +605,6 @@ export function applyActorSuccess(
   return { state, description: "?", goal: false };
 }
 
-// When a defender intercepts, the defender's team gains the ball.
-// The original acting team consumed their turn, so the defender's team
-// becomes the next ball-carrier AND gets the next turn (they earned it).
 export function applyDefenderSteal(
   state: GameState,
   defender: PlayerState,
@@ -479,13 +624,31 @@ export function applyDefenderSteal(
       {
         at: Date.now(),
         text: `🛑 ${badge(defender)} перехватил ${
-          action.type === "shoot" ? "удар" : action.type === "pass" ? "пас" : "мяч"
+          action.type === "shoot"
+            ? "удар"
+            : action.type === "pass" || action.type === "lob"
+              ? "пас"
+              : "мяч"
         } у ${actor ? badge(actor) : "соперника"}.`,
       },
     ],
     quiz: null,
+    ballAnim: actor
+      ? {
+          fromPos: { ...actor.pos },
+          toPos: { ...defender.pos },
+          kind:
+            action.type === "lob"
+              ? "lob"
+              : action.type === "pass"
+                ? "pass"
+                : "dribble",
+          startedAt: Date.now(),
+          durationMs: 500,
+        }
+      : null,
   };
-  return { state: next, description: "Перехват", goal: false };
+  return { state: next, description: "Перехват!", goal: false };
 }
 
 export function applyTotalFailure(
@@ -496,9 +659,9 @@ export function applyTotalFailure(
   if (!actor) return { state, description: "?", goal: false };
 
   const ballLandPos: Position =
-    action.type === "pass"
+    action.type === "pass" || action.type === "lob"
       ? findPlayerById(state, action.to)?.pos ?? { ...actor.pos }
-      : action.type === "dribble"
+      : action.type === "dribble" || action.type === "sprint"
         ? action.toPos
         : { ...actor.pos };
 
@@ -520,7 +683,6 @@ export function applyTotalFailure(
     ballCarrierId: nearest.id,
     ballPos: { ...nearest.pos },
     activePlayerId: nearest.id,
-    // They just took the ball — they earned the next turn.
     turn: nearest.team,
     status: "play",
     turnNumber: state.turnNumber + 1,
@@ -532,6 +694,7 @@ export function applyTotalFailure(
       },
     ],
     quiz: null,
+    ballAnim: null,
   };
   return { state: next, description: "Потеря темпа", goal: false };
 }
